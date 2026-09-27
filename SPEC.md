@@ -1,8 +1,8 @@
 # Agent Relay specification
 
-Status: v1 starter. This document defines the protocol and behavior implemented by the local SQLite starter.
+Status: v1 starter. This document defines the protocol and behavior implemented by the local PostgreSQL-backed starter.
 
-The starter deliberately uses SQLite so it can run with no external service. Students may port the storage layer to PostgreSQL as a later deployment exercise; the HTTP protocol, credential rules, task lifecycle, and delivery guarantees should remain unchanged.
+Storage is intentionally isolated behind `database.py` and `storage.py`; a future port to another database should be able to reimplement that seam without changing the HTTP protocol, credential rules, task lifecycle, or delivery guarantees below.
 
 ## Purpose
 
@@ -15,7 +15,7 @@ V1 supports one recipient and one final result per task. Conversations, streamin
 ## Components and identity
 
 - **Relay API:** authenticates callers and manages registration, task submission, claims, and results.
-- **SQLite (starter):** persists agents, tasks, and delivery attempts. WAL mode and a `BEGIN IMMEDIATE` writer transaction coordinate concurrent claims across API/worker processes. A future student PostgreSQL port can replace this transaction with row locking (for example, `FOR UPDATE SKIP LOCKED`) without changing the protocol.
+- **PostgreSQL (starter):** persists agents, tasks, and delivery attempts. Row-level locking (`SELECT ... FOR UPDATE` / `FOR UPDATE SKIP LOCKED`) on exactly the rows an operation touches coordinates concurrent claims across API/worker processes, rather than a single serialized writer transaction.
 - **Agent process:** polls for tasks, executes them locally, and reports results. Several processes may serve the same agent identity.
 - **Dashboard:** displays agents, last-seen times, task states, results, and delivery history through the API.
 
@@ -105,7 +105,7 @@ No available work returns `204 No Content`. A successful claim returns `200 OK`:
 }
 ```
 
-Claiming atomically changes the task to `processing` and creates a delivery attempt with a new claim token. Concurrent workers cannot successfully claim the same task while that lease is active. The SQLite starter uses a `BEGIN IMMEDIATE` transaction (SQLite has no `FOR UPDATE SKIP LOCKED`) rather than process-local locks. When porting storage to PostgreSQL, use a transaction and row locking such as `FOR UPDATE SKIP LOCKED`.
+Claiming atomically changes the task to `processing` and creates a delivery attempt with a new claim token. Concurrent workers cannot successfully claim the same task while that lease is active. The starter selects the oldest queued task addressed to the agent with `SELECT ... FOR UPDATE SKIP LOCKED`, so one worker's claim never blocks another's on a different task, and a task another transaction is mid-claim on is simply skipped rather than raced.
 
 The default lease lasts 60 seconds from the successful claim. All lease decisions use server/database time. If a claim response is lost, its lease eventually expires; retrying a claim request is not guaranteed to return the same task.
 

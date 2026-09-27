@@ -1,0 +1,14 @@
+# Named "postgres" so the app's connection string
+# (postgresql+psycopg://...@postgres:5432/...) resolves via cluster DNS,
+# matching the service name used in compose.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agent-relay
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

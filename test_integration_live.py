@@ -1,11 +1,11 @@
 """Black-box integration test against a running Agent Relay instance.
 
 Unlike ``test_agent_relay.py`` (in-process ``TestClient`` against a scratch
-SQLite file), this test speaks real HTTP to whatever server is listening at
+database), this test speaks real HTTP to whatever server is listening at
 ``RELAY_BASE_URL`` and exercises whatever database that server is configured
 with. It requires a server to already be running (``uv run uvicorn main:app``
-or the ``agent-relay:local`` Docker image) and skips itself if none answers,
-so it never blocks a normal ``pytest`` run in CI.
+or ``docker compose up``) and skips itself if none answers, so it never
+blocks a normal ``pytest`` run in CI.
 """
 
 from __future__ import annotations

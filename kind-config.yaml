@@ -1,0 +1,11 @@
+# Local kind cluster for Agent Relay. Maps the agent-relay Service's
+# NodePort (30080, set in k8s/agent-relay-service.yaml) to localhost:8080
+# so the app is reachable without `kubectl port-forward`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP

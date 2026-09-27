@@ -1,6 +1,6 @@
 """FastAPI routes for Agent Relay.
 
-Persistence and SQLite transaction details live in :mod:`database` and
+Persistence and database transaction details live in :mod:`database` and
 :mod:`storage`; the deterministic local worker is in :mod:`worker`.
 """
 
@@ -101,9 +101,26 @@ async def recovery_loop(stop: asyncio.Event) -> None:
             pass
 
 
+def init_db_with_retry(attempts: int = 8, initial_delay: float = 0.5) -> None:
+    """Retry schema setup so a pod started before its database is reachable
+    (a normal ordering under Kubernetes/Compose, which do not guarantee
+    dependency readiness) doesn't crash on its first connection attempt."""
+
+    delay = initial_delay
+    for attempt in range(attempts):
+        try:
+            init_db()
+            return
+        except OperationalError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 4.0)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
+    init_db_with_retry()
     stop = asyncio.Event()
     recovery_task = asyncio.create_task(recovery_loop(stop))
     try:
@@ -118,7 +135,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Agent Relay", version="0.1.0", lifespan=lifespan)
 # ASGI transports used by small scripts do not always run lifespan handlers;
 # initialize the schema at import as well as during normal application startup.
-init_db()
+init_db_with_retry()
 
 
 @app.exception_handler(RelayError)
@@ -205,15 +222,8 @@ async def tasks_create(
         not idempotency_key.strip() or len(idempotency_key) > 255 or "\x00" in idempotency_key
     ):
         raise RelayError("invalid_input", "Idempotency-Key must be nonempty and at most 255 characters.", 400)
-    for retry in range(3):
-        try:
-            result = create_task(current.id, body.to, body.input, idempotency_key)
-            return JSONResponse(status_code=201, content=result)
-        except OperationalError as exc:
-            if retry == 2 or "locked" not in str(exc).lower():
-                raise
-            await asyncio.sleep(0.05 * (retry + 1))
-    raise RelayError("storage_error", "The task could not be persisted.", 503)
+    result = await asyncio.to_thread(create_task, current.id, body.to, body.input, idempotency_key)
+    return JSONResponse(status_code=201, content=result)
 
 
 @app.post("/api/v1/tasks/claim")
@@ -223,12 +233,7 @@ async def claim(
 ) -> Response:
     deadline = time.monotonic() + body.wait_seconds
     while True:
-        try:
-            result = await asyncio.to_thread(claim_one, current.id, body.worker_id)
-        except OperationalError as exc:
-            if "locked" not in str(exc).lower():
-                raise
-            result = None
+        result = await asyncio.to_thread(claim_one, current.id, body.worker_id)
         if result is not None:
             return JSONResponse(status_code=200, content=result)
         remaining = deadline - time.monotonic()

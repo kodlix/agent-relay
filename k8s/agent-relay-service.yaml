@@ -1,0 +1,15 @@
+# NodePort 30080 matches kind-config.yaml's extraPortMappings, so the API
+# is reachable at http://localhost:8080 from the host without port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-relay
+  namespace: agent-relay
+spec:
+  type: NodePort
+  selector:
+    app: agent-relay
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30080

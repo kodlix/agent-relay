@@ -1,22 +1,43 @@
-# Agent Relay (SQLite starter)
+# Agent Relay
 
 Agent Relay is a small FastAPI service for registering agents, delivering one
-task at a time, and recording results. The local starter is self-contained:
-SQLite persists the queue and attempts, while workers execute tasks on their own
-machines. The included worker deterministically returns `input.upper()`.
+task at a time, and recording results. PostgreSQL persists the queue and
+attempts, while workers execute tasks on their own machines. The included
+worker deterministically returns `input.upper()`.
 
 ## Run it
 
 ```bash
+docker compose up --build
+```
+
+This starts PostgreSQL and the API together (service names `postgres` and
+`agent-relay`); the API waits for the database's healthcheck before starting.
+Open <http://127.0.0.1:8000/> for the token-based local dashboard. `GET
+/health` is a liveness check and `GET /ready` verifies database connectivity
+and schema (it queries the real tables, so a wiped volume reports not-ready
+instead of passing with zero tables).
+
+If port `5432` or `8000` is already taken on your machine, remap them without
+editing the file:
+
+```bash
+POSTGRES_PORT=5433 API_PORT=8001 docker compose up --build
+```
+
+To run the API on the host instead of in a container (useful for `--reload`),
+start only PostgreSQL and point the app at its published port:
+
+```bash
+docker compose up -d postgres
 uv sync
 uv run uvicorn main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/> for the token-based local dashboard. The default
-database is `./agent-relay.db`; set `RELAY_DATABASE_URL` to use another SQLite
-file. `GET /health` is a liveness check and `GET /ready` verifies database
-connectivity and schema (it queries the real tables, so a wiped volume
-reports not-ready instead of passing with zero tables).
+The default `RELAY_DATABASE_URL`
+(`postgresql+psycopg://postgres:postgres@localhost:5432/agent_relay`) matches
+that published port. Set `RELAY_DATABASE_URL` to point at a different
+PostgreSQL instance instead.
 
 Register two identities and send a task:
 
@@ -67,13 +88,13 @@ uv run python main.py worker --agent-id agent_123 --token agt_… --worker-id la
 
 ## Storage and delivery behavior
 
-`database.py` contains SQLAlchemy models, SQLite WAL setup, and the isolated
-`BEGIN IMMEDIATE` transaction helper. `storage.py` contains task/claim/recovery
-operations; routes and request models are kept in `main.py` and `schemas.py`.
-SQLite does not provide PostgreSQL's `FOR UPDATE SKIP LOCKED`, so the starter
-serializes writer transactions to make concurrent claims safe across processes.
-Students can port this storage seam to PostgreSQL later without changing the
-HTTP protocol or lifecycle in `SPEC.md`.
+`database.py` contains SQLAlchemy models and engine setup. `storage.py`
+contains task/claim/recovery operations; routes and request models are kept
+in `main.py` and `schemas.py`. Claim, heartbeat, terminal submission, and
+recovery each take row-level locks on exactly the rows they touch
+(`SELECT ... FOR UPDATE` / `FOR UPDATE SKIP LOCKED`), so concurrent claims
+across API processes are coordinated by PostgreSQL rather than a
+process-local lock.
 
 Claims are at-least-once and leased for 60 seconds by default. Heartbeats extend
 an active lease. A completion or failure must include the recipient's bearer
@@ -88,15 +109,55 @@ lease expiry before and after recovery, pagination/error shape, and dashboard
 asset serving:
 
 ```bash
+docker compose up -d postgres
 uv run pytest -q
 ```
 
-Tests default to a scratch database at `/tmp/agent-relay-test.db` so they
-don't reset your dev server's `./agent-relay.db`. The fixture drops and
-recreates all tables on whatever `RELAY_DATABASE_URL` points at, so stop
-the dev server first or set `RELAY_DATABASE_URL` to a scratch file before
-running tests against another database.
+Tests default to a separate `agent_relay_test` database on the same
+PostgreSQL instance, created by `initdb/001-create-test-db.sql` the first
+time the `postgres` service's data volume is initialized (delete the
+`postgres-data` volume with `docker compose down -v` to force it to run
+again). The fixture drops and recreates all tables on whatever
+`RELAY_DATABASE_URL` points at, so don't run tests against a database with
+data you need; set `RELAY_DATABASE_URL` explicitly to override the default.
 
-This starter intentionally does not include Docker, Kubernetes, CI, external
-brokers, an LLM, or a PostgreSQL implementation. Those are deployment and
-student-port concerns rather than part of the local relay protocol.
+`test_integration_live.py` is a separate, black-box check that speaks real
+HTTP to whatever server is already running at `RELAY_BASE_URL` (default
+`http://127.0.0.1:8000`); it skips itself if none is reachable.
+
+This starter intentionally does not include CI, external brokers, or an LLM.
+Those are deployment concerns rather than part of the local relay protocol.
+
+## Run it on Kubernetes (kind)
+
+```bash
+brew install kind          # kubectl is assumed to already be installed
+kind create cluster --name agent-relay --config kind-config.yaml
+docker build -t agent-relay:local .
+kind load docker-image agent-relay:local --name agent-relay
+kubectl apply -f k8s/
+kubectl -n agent-relay rollout status deployment/postgres
+kubectl -n agent-relay rollout status deployment/agent-relay
+```
+
+Open <http://localhost:8080/> — `kind-config.yaml` maps the cluster node's
+NodePort 30080 (set on the `agent-relay` Service) to that host port. `k8s/`
+contains a `postgres` Deployment backed by a `PersistentVolumeClaim` (data
+survives pod restarts/rescheduling) and a two-replica `agent-relay`
+Deployment, both with `livenessProbe`/`readinessProbe`s wired to `/health`
+and `/ready`. The Postgres Service is named `postgres`, so
+`RELAY_DATABASE_URL` (in `k8s/postgres-secret.yaml`) resolves it the same way
+`compose.yaml` does.
+
+`kind load docker-image` copies the image straight into the cluster's own
+container runtime — there is no registry, so the Deployments set
+`imagePullPolicy: Never`. Rebuild and reload after code changes, then roll
+the deployment:
+
+```bash
+docker build -t agent-relay:local .
+kind load docker-image agent-relay:local --name agent-relay
+kubectl -n agent-relay rollout restart deployment/agent-relay
+```
+
+Tear down with `kind delete cluster --name agent-relay`.
